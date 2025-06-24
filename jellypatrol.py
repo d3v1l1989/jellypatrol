@@ -1,50 +1,80 @@
 import requests
 import time
 import json
+import os
+from dotenv import load_dotenv
 
-# --- Global Configuration ---
-CHECK_INTERVAL_SECONDS = 30
-TARGET_WIDTH = 3840
-TARGET_HEIGHT = 2160
-KILL_STREAMS = True # Set to True to actually kill streams, False for dry run
+# Load environment variables from .env file
+load_dotenv()
 
-MESSAGE_HEADER = "Playback Terminated by Server Policy"
-MESSAGE_BODY = "Your 4K video transcode session is being terminated due to server resource policy. Please adjust your quality settings. Audio-only 4K transcodes may be permitted."
-MESSAGE_DISPLAY_TIMEOUT_MS = 7000
+# --- Configuration from Environment Variables ---
+CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', '30'))
+RESOLUTION_POLICY = os.getenv('RESOLUTION_POLICY', '4K').upper()
+KILL_STREAMS = os.getenv('KILL_STREAMS', 'true').lower() == 'true'
+CHECK_AUDIO_TRANSCODES = os.getenv('CHECK_AUDIO_TRANSCODES', 'false').lower() == 'true'
 
-# Reasons that indicate video is being transcoded or processed in a way we want to stop
-VIDEO_TRANSCODE_INDICATORS = [
-    "VideoCodecNotSupported", "VideoResolutionNotSupported",
-    "VideoBitrateNotSupported", "VideoFramerateNotSupported",
-    "VideoLevelNotSupported", "VideoProfileNotSupported",
-    "AnamorphicVideoNotSupported", "VideoRangeNotSupported",
-    "VideoRangeTypeNotSupported",
-    "ContainerNotSupported",
-    "ContainerBitrateExceedsLimit"
-]
-# --- End Global Configuration ---
+MESSAGE_HEADER = os.getenv('MESSAGE_HEADER', 'Playback Terminated by Server Policy')
+MESSAGE_BODY = os.getenv('MESSAGE_BODY', 'Your video transcode session is being terminated due to server resource policy. Please adjust your quality settings.')
+MESSAGE_DISPLAY_TIMEOUT_MS = int(os.getenv('MESSAGE_DISPLAY_TIMEOUT_MS', '7000'))
 
-# --- Server Configuration ---
-# Add or modify your server details here.
-SERVERS = [
-    {
-        "name": "My Jellyfin Server",
-        "type": "jellyfin",
-        "url": "http://jellyfin:8096",
-        "api_key": "",
-        "enabled": True
-    },
-    {
-        "name": "My Emby Server",
-        "type": "emby",
-        "url": "http://emby:8096",
-        "api_key": "",
-        "enabled": True # Set to True to enable this server
-    },
-]
+# Resolution thresholds based on policy
+RESOLUTION_THRESHOLDS = {
+    '4K': (3840, 2160),
+    '1080P': (1920, 1080),
+    'ALL': (0, 0)  # Will match any resolution
+}
+
+# Get target resolution based on policy
+TARGET_WIDTH, TARGET_HEIGHT = RESOLUTION_THRESHOLDS.get(RESOLUTION_POLICY, (3840, 2160))
+
+# Load transcode indicators from environment
+VIDEO_TRANSCODE_INDICATORS = os.getenv(
+    'VIDEO_TRANSCODE_INDICATORS',
+    'VideoCodecNotSupported,VideoResolutionNotSupported,VideoBitrateNotSupported,VideoFramerateNotSupported,VideoLevelNotSupported,VideoProfileNotSupported,AnamorphicVideoNotSupported,VideoRangeNotSupported,VideoRangeTypeNotSupported,ContainerNotSupported,ContainerBitrateExceedsLimit'
+).split(',')
+
+AUDIO_TRANSCODE_INDICATORS = os.getenv(
+    'AUDIO_TRANSCODE_INDICATORS',
+    'AudioCodecNotSupported,AudioBitrateNotSupported,AudioChannelsNotSupported,AudioSampleRateNotSupported,AudioBitDepthNotSupported'
+).split(',')
+
+SCRIPT_USER_AGENT = os.getenv('SCRIPT_USER_AGENT', 'MediaServerPatrol/2.0')
+# --- End Configuration ---
+
+# --- Server Configuration from Environment Variables ---
+def load_servers_from_env():
+    """Load server configurations from environment variables."""
+    servers = []
+    server_num = 1
+    
+    while True:
+        prefix = f"SERVER{server_num}_"
+        enabled = os.getenv(f"{prefix}ENABLED", '').lower() == 'true'
+        
+        # If no enabled setting found, we've reached the end
+        if f"{prefix}ENABLED" not in os.environ:
+            break
+            
+        if enabled:
+            server = {
+                "name": os.getenv(f"{prefix}NAME", f"Server {server_num}"),
+                "type": os.getenv(f"{prefix}TYPE", "jellyfin"),
+                "url": os.getenv(f"{prefix}URL", ""),
+                "api_key": os.getenv(f"{prefix}API_KEY", ""),
+                "enabled": True
+            }
+            servers.append(server)
+        
+        server_num += 1
+        
+        # Safety limit to prevent infinite loop
+        if server_num > 20:
+            break
+    
+    return servers
+
+SERVERS = load_servers_from_env()
 # --- End Server Configuration ---
-
-SCRIPT_USER_AGENT = "MediaServerPatrol/2.0"
 
 def get_headers(api_key):
     return {
@@ -81,7 +111,113 @@ def send_message_to_session(server_url, api_key, session_id, header, body_text, 
         print(f"    Error sending message to session {session_id} on {server_url}: {e}")
         return False
 
-def terminate_session(server_url, api_key, session_id, reason="Terminating 4K video transcode."):
+def check_video_transcode(session, server_name, user_name, client_name, session_id):
+    """Check if a video transcode session should be terminated based on resolution policy."""
+    print(f"  Found transcoding video session: ID={session_id}, User='{user_name}', Client='{client_name}'")
+    
+    now_playing_item = session.get("NowPlayingItem", {})
+    media_streams = now_playing_item.get("MediaStreams", [])
+    
+    # Find video stream
+    original_video_stream = None
+    for stream in media_streams:
+        if stream.get("Type") == "Video":
+            original_video_stream = stream
+            break
+    
+    if not original_video_stream:
+        print(f"    WARNING: Could not determine original video stream resolution for session {session_id} on {server_name}.")
+        return False, ""
+    
+    original_width = original_video_stream.get("Width", 0)
+    original_height = original_video_stream.get("Height", 0)
+    codec = original_video_stream.get("Codec", "N/A")
+    print(f"    Original Resolution: {original_width}x{original_height}, Codec: {codec}")
+    
+    transcoding_info = session.get("TranscodingInfo", {})
+    transcode_reasons = []
+    if transcoding_info:
+        target_width_transcoding = transcoding_info.get("Width")
+        target_height_transcoding = transcoding_info.get("Height")
+        transcode_reasons = transcoding_info.get("TranscodeReasons", [])
+        print(f"    Transcoding To: {target_width_transcoding}x{target_height_transcoding}, Reasons: {transcode_reasons}")
+    else:
+        print("    WARNING: TranscodingInfo not available for this session.")
+    
+    # Check if resolution meets our policy threshold
+    if original_width >= TARGET_WIDTH or original_height >= TARGET_HEIGHT:
+        is_video_component_transcoding = False
+        
+        if not transcode_reasons and transcoding_info:
+            print(f"      WARNING: No transcode reasons available, but {RESOLUTION_POLICY} file is transcoding. Assuming video transcode for safety.")
+            is_video_component_transcoding = True
+        else:
+            for reason in transcode_reasons:
+                if reason in VIDEO_TRANSCODE_INDICATORS:
+                    is_video_component_transcoding = True
+                    break
+        
+        if is_video_component_transcoding:
+            policy_desc = f"{RESOLUTION_POLICY}" if RESOLUTION_POLICY != "ALL" else "video"
+            reason_message = (f"Transcoding {policy_desc} content ({original_width}x{original_height}) on {server_name} "
+                              f"by User: {user_name} on Client: {client_name}. Reasons: {transcode_reasons}")
+            print(f"    ALERT: {reason_message}")
+            return True, reason_message
+        else:
+            policy_desc = f"{RESOLUTION_POLICY}" if RESOLUTION_POLICY != "ALL" else "video"
+            print(f"    INFO: Transcoding {policy_desc} content ({original_width}x{original_height}) on {server_name} "
+                  f"but video components appear to be direct playing/streaming or reason not in kill list. Skipping. Reasons: {transcode_reasons}")
+            return False, ""
+    else:
+        policy_desc = f"below {RESOLUTION_POLICY} threshold" if RESOLUTION_POLICY != "ALL" else "video"
+        print(f"    INFO: Content resolution ({original_width}x{original_height}) is {policy_desc} on {server_name}. Skipping.")
+        return False, ""
+
+def check_audio_transcode(session, server_name, user_name, client_name, session_id):
+    """Check if an audio transcode session should be terminated."""
+    print(f"  Found transcoding audio session: ID={session_id}, User='{user_name}', Client='{client_name}'")
+    
+    now_playing_item = session.get("NowPlayingItem", {})
+    media_streams = now_playing_item.get("MediaStreams", [])
+    
+    # Find audio stream info
+    original_audio_streams = [stream for stream in media_streams if stream.get("Type") == "Audio"]
+    if original_audio_streams:
+        audio_info = original_audio_streams[0]  # Use first audio stream for info
+        codec = audio_info.get("Codec", "N/A")
+        channels = audio_info.get("Channels", "N/A")
+        sample_rate = audio_info.get("SampleRate", "N/A")
+        print(f"    Original Audio: Codec={codec}, Channels={channels}, SampleRate={sample_rate}")
+    
+    transcoding_info = session.get("TranscodingInfo", {})
+    transcode_reasons = []
+    if transcoding_info:
+        transcode_reasons = transcoding_info.get("TranscodeReasons", [])
+        print(f"    Audio Transcode Reasons: {transcode_reasons}")
+    else:
+        print("    WARNING: TranscodingInfo not available for this session.")
+    
+    # Check if any audio transcode reasons match our indicators
+    is_audio_component_transcoding = False
+    if not transcode_reasons and transcoding_info:
+        print("      WARNING: No transcode reasons available, but audio file is transcoding. Assuming audio transcode for safety.")
+        is_audio_component_transcoding = True
+    else:
+        for reason in transcode_reasons:
+            if reason in AUDIO_TRANSCODE_INDICATORS:
+                is_audio_component_transcoding = True
+                break
+    
+    if is_audio_component_transcoding:
+        reason_message = (f"Transcoding audio content on {server_name} "
+                          f"by User: {user_name} on Client: {client_name}. Reasons: {transcode_reasons}")
+        print(f"    ALERT: {reason_message}")
+        return True, reason_message
+    else:
+        print(f"    INFO: Audio transcoding on {server_name} but reasons not in kill list. Skipping. Reasons: {transcode_reasons}")
+        return False, ""
+
+def terminate_session(server_url, api_key, session_id, reason="Terminating transcode session."):
     """Sends a message and then immediately terminates a specific session on a given server."""
     try:
         print(f"  Terminating session {session_id} on {server_url} for reason: {reason}")
@@ -98,8 +234,8 @@ def terminate_session(server_url, api_key, session_id, reason="Terminating 4K vi
     except requests.exceptions.RequestException as e:
         print(f"  Error in termination process for session {session_id} on {server_url}: {e}")
 
-def check_and_kill_4k_transcodes_for_server(server_config):
-    """Checks active sessions on a specific server and terminates 4K transcodes if video is being processed."""
+def check_and_kill_transcodes_for_server(server_config):
+    """Checks active sessions on a specific server and terminates transcodes based on configured policies."""
     server_name = server_config["name"]
     server_url = server_config["url"]
     api_key = server_config["api_key"]
@@ -130,63 +266,27 @@ def check_and_kill_4k_transcodes_for_server(server_config):
         media_type = now_playing_item.get("MediaType")
 
         if media_type == "Video" and is_transcoding:
-            print(f"  Found transcoding video session: ID={session_id}, User='{user_name}', Client='{client_name}'")
-
-            original_video_stream = None
-            media_streams = now_playing_item.get("MediaStreams", [])
-            for stream in media_streams:
-                if stream.get("Type") == "Video":
-                    original_video_stream = stream
-                    break
-
-            if original_video_stream:
-                original_width = original_video_stream.get("Width", 0)
-                original_height = original_video_stream.get("Height", 0)
-                codec = original_video_stream.get("Codec", "N/A")
-                print(f"    Original Resolution: {original_width}x{original_height}, Codec: {codec}")
-
-                transcoding_info = session.get("TranscodingInfo", {})
-                transcode_reasons = []
-                if transcoding_info:
-                    target_width_transcoding = transcoding_info.get("Width")
-                    target_height_transcoding = transcoding_info.get("Height")
-                    transcode_reasons = transcoding_info.get("TranscodeReasons", [])
-                    print(f"    Transcoding To: {target_width_transcoding}x{target_height_transcoding}, Reasons: {transcode_reasons}")
-                else:
-                    print("    WARNING: TranscodingInfo not available for this session.")
-
-                if original_width >= TARGET_WIDTH or original_height >= TARGET_HEIGHT:
-                    is_video_component_transcoding = False
-                    if not transcode_reasons and transcoding_info:
-                        print("      WARNING: No transcode reasons available, but 4K file is transcoding. Assuming video transcode for safety.")
-                        is_video_component_transcoding = True
-                    else:
-                        for reason in transcode_reasons:
-                            if reason in VIDEO_TRANSCODE_INDICATORS:
-                                is_video_component_transcoding = True
-                                break
-
-                    if is_video_component_transcoding:
-                        reason_message = (f"Transcoding 4K content ({original_width}x{original_height}) on {server_name} "
-                                          f"by User: {user_name} on Client: {client_name}. Reasons: {transcode_reasons}")
-                        print(f"    ALERT: {reason_message}")
-                        terminate_session(server_url, api_key, session_id, reason_message)
-                    else:
-                        print(f"    INFO: Transcoding 4K content ({original_width}x{original_height}) on {server_name} "
-                              f"but video components appear to be direct playing/streaming or reason not in kill list. Skipping. Reasons: {transcode_reasons}")
-                else:
-                    print(f"    INFO: Transcoding non-4K content ({original_width}x{original_height}) on {server_name}. Skipping.")
-            else:
-                print(f"    WARNING: Could not determine original video stream resolution for session {session_id} on {server_name}.")
+            should_terminate, reason_message = check_video_transcode(session, server_name, user_name, client_name, session_id)
+            if should_terminate:
+                terminate_session(server_url, api_key, session_id, reason_message)
+        elif media_type == "Audio" and is_transcoding and CHECK_AUDIO_TRANSCODES:
+            should_terminate, reason_message = check_audio_transcode(session, server_name, user_name, client_name, session_id)
+            if should_terminate:
+                terminate_session(server_url, api_key, session_id, reason_message)
         elif media_type == "Video" and not is_transcoding:
-             print(f"  Direct Play/Stream session on {server_name}: ID={session_id}, User='{user_name}', Client='{client_name}'. Skipping.")
+            print(f"  Direct Play/Stream session on {server_name}: ID={session_id}, User='{user_name}', Client='{client_name}'. Skipping.")
+        elif media_type == "Audio" and not is_transcoding and CHECK_AUDIO_TRANSCODES:
+            print(f"  Direct Play/Stream audio session on {server_name}: ID={session_id}, User='{user_name}', Client='{client_name}'. Skipping.")
 
 
 if __name__ == "__main__":
     print(f"Starting Media Server Patrol. KILL_STREAMS is set to: {KILL_STREAMS}")
     print(f"Checking every {CHECK_INTERVAL_SECONDS} seconds.")
-    print(f"Will target original media width >= {TARGET_WIDTH} or height >= {TARGET_HEIGHT}.")
+    print(f"Resolution policy: {RESOLUTION_POLICY} (targeting width >= {TARGET_WIDTH} or height >= {TARGET_HEIGHT})")
+    print(f"Audio transcode checking: {CHECK_AUDIO_TRANSCODES}")
     print(f"Video transcode indicators for termination: {VIDEO_TRANSCODE_INDICATORS}")
+    if CHECK_AUDIO_TRANSCODES:
+        print(f"Audio transcode indicators for termination: {AUDIO_TRANSCODE_INDICATORS}")
     if KILL_STREAMS:
         print("A message will be sent to the user before termination.")
     else:
@@ -207,7 +307,7 @@ if __name__ == "__main__":
             for server_config in SERVERS:
                 if server_config.get("enabled"):
                     try:
-                        check_and_kill_4k_transcodes_for_server(server_config)
+                        check_and_kill_transcodes_for_server(server_config)
                     except Exception as e:
                         # Basic error handling for an individual server check
                         print(f"!! UNHANDLED EXCEPTION while processing server {server_config.get('name', 'Unknown Server')}: {e}")
