@@ -13,6 +13,7 @@ RESOLUTION_POLICY = os.getenv('RESOLUTION_POLICY', '4K').upper()
 KILL_STREAMS = os.getenv('KILL_STREAMS', 'true').lower() == 'true'
 CHECK_AUDIO_TRANSCODES = os.getenv('CHECK_AUDIO_TRANSCODES', 'false').lower() == 'true'
 ALLOW_CONTAINER_CHANGES = os.getenv('ALLOW_CONTAINER_CHANGES', 'false').lower() == 'true'
+IGNORE_STRM_FILES = os.getenv('IGNORE_STRM_FILES', 'false').lower() == 'true'
 
 MESSAGE_HEADER = os.getenv('MESSAGE_HEADER', 'Playback Terminated by Server Policy')
 MESSAGE_BODY = os.getenv('MESSAGE_BODY', 'Your video transcode session is being terminated due to server resource policy. Please adjust your quality settings.')
@@ -83,6 +84,18 @@ def get_headers(api_key):
         "Content-Type": "application/json",
         "User-Agent": SCRIPT_USER_AGENT
     }
+
+def is_strm_file(now_playing_item):
+    """Check if the current playing item is a .strm file."""
+    if not now_playing_item:
+        return False
+    
+    # Check various possible fields for file path/name
+    path = now_playing_item.get("Path", "")
+    container = now_playing_item.get("Container", "")
+    
+    # Check if it's a .strm file
+    return path.lower().endswith('.strm') or container.lower() == 'strm'
 
 def get_active_sessions(server_url, api_key):
     """Fetches active sessions from a given server."""
@@ -271,6 +284,11 @@ def check_and_kill_transcodes_for_server(server_config):
         if not now_playing_item or not session_id:
             continue
 
+        # Skip .strm files if IGNORE_STRM_FILES is enabled
+        if IGNORE_STRM_FILES and is_strm_file(now_playing_item):
+            print(f"  Skipping .strm file session: ID={session_id}, User='{user_name}', Client='{client_name}' (IGNORE_STRM_FILES enabled)")
+            continue
+
         is_transcoding = play_state.get("PlayMethod") == "Transcode"
         media_type = now_playing_item.get("MediaType")
 
@@ -294,6 +312,7 @@ if __name__ == "__main__":
     print(f"Resolution policy: {RESOLUTION_POLICY} (targeting width >= {TARGET_WIDTH} or height >= {TARGET_HEIGHT})")
     print(f"Audio transcode checking: {CHECK_AUDIO_TRANSCODES}")
     print(f"Allow container changes: {ALLOW_CONTAINER_CHANGES}")
+    print(f"Ignore .strm files: {IGNORE_STRM_FILES}")
     print(f"Video transcode indicators for termination: {VIDEO_TRANSCODE_INDICATORS}")
     if CHECK_AUDIO_TRANSCODES:
         print(f"Audio transcode indicators for termination: {AUDIO_TRANSCODE_INDICATORS}")

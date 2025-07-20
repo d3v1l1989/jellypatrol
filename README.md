@@ -7,6 +7,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **Resolution Policies**: Terminate 4K, 1080P, or ALL video transcodes
 - **Multi-Server Support**: Monitor multiple servers simultaneously
 - **Live TV Support**: Allow container changes for live TV in web browsers
+- **Sports Stream Support**: Skip .strm files (MLB, NFL, NBA, etc.)
 - **Dry-Run Mode**: Test configuration without terminating sessions
 - **User Notifications**: Send messages before terminating sessions
 - **Docker Compose**: Simple deployment with pre-built images
@@ -57,6 +58,10 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
    # Allow container format changes during playback (useful for live TV in web browsers)
    # When enabled, ContainerNotSupported and ContainerBitrateExceedsLimit will be ignored
    ALLOW_CONTAINER_CHANGES=false
+   
+   # Ignore .strm files (useful for sports streams that get proxied through server)
+   # When enabled, sessions playing .strm files will never be terminated
+   IGNORE_STRM_FILES=false
    
    # ===== USER MESSAGES =====
    MESSAGE_HEADER=Playback Terminated by Server Policy
@@ -113,6 +118,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **`RESOLUTION_POLICY`**: `4K` (3840x2160+), `1080P` (1920x1080+), or `ALL` 
 - **`KILL_STREAMS`**: `true` for live mode, `false` for dry-run testing
 - **`ALLOW_CONTAINER_CHANGES`**: `true` to allow container changes for live TV
+- **`IGNORE_STRM_FILES`**: `true` to skip .strm files (sports streams)
 - **`CHECK_AUDIO_TRANSCODES`**: `true` to also monitor audio transcoding
 
 ## Getting API Keys
