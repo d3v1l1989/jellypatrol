@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  jellypatrol:
+    image: ghcr.io/d3v1l1989/jellypatrol:latest
+    container_name: jellypatrol
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - mediaserver
+
+networks:
+  mediaserver:
+    external: true
