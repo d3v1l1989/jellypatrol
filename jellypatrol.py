@@ -14,6 +14,7 @@ KILL_STREAMS = os.getenv('KILL_STREAMS', 'true').lower() == 'true'
 CHECK_AUDIO_TRANSCODES = os.getenv('CHECK_AUDIO_TRANSCODES', 'false').lower() == 'true'
 ALLOW_CONTAINER_CHANGES = os.getenv('ALLOW_CONTAINER_CHANGES', 'false').lower() == 'true'
 IGNORE_STRM_FILES = os.getenv('IGNORE_STRM_FILES', 'false').lower() == 'true'
+WHITELISTED_USERS = [user.strip() for user in os.getenv('WHITELISTED_USERS', '').split(',') if user.strip()]
 
 MESSAGE_HEADER = os.getenv('MESSAGE_HEADER', 'Playback Terminated by Server Policy')
 MESSAGE_BODY = os.getenv('MESSAGE_BODY', 'Your video transcode session is being terminated due to server resource policy. Please adjust your quality settings.')
@@ -96,6 +97,14 @@ def is_strm_file(now_playing_item):
     
     # Check if it's a .strm file
     return path.lower().endswith('.strm') or container.lower() == 'strm'
+
+def is_user_whitelisted(user_name):
+    """Check if a user is in the whitelist and should be exempt from termination."""
+    if not WHITELISTED_USERS or not user_name:
+        return False
+    
+    # Case-insensitive comparison
+    return user_name.lower() in [user.lower() for user in WHITELISTED_USERS]
 
 def get_active_sessions(server_url, api_key):
     """Fetches active sessions from a given server."""
@@ -284,6 +293,11 @@ def check_and_kill_transcodes_for_server(server_config):
         if not now_playing_item or not session_id:
             continue
 
+        # Skip whitelisted users
+        if is_user_whitelisted(user_name):
+            print(f"  Skipping whitelisted user session: ID={session_id}, User='{user_name}', Client='{client_name}' (user is whitelisted)")
+            continue
+
         # Skip .strm files if IGNORE_STRM_FILES is enabled
         if IGNORE_STRM_FILES and is_strm_file(now_playing_item):
             print(f"  Skipping .strm file session: ID={session_id}, User='{user_name}', Client='{client_name}' (IGNORE_STRM_FILES enabled)")
@@ -313,6 +327,10 @@ if __name__ == "__main__":
     print(f"Audio transcode checking: {CHECK_AUDIO_TRANSCODES}")
     print(f"Allow container changes: {ALLOW_CONTAINER_CHANGES}")
     print(f"Ignore .strm files: {IGNORE_STRM_FILES}")
+    if WHITELISTED_USERS:
+        print(f"Whitelisted users: {', '.join(WHITELISTED_USERS)}")
+    else:
+        print("No whitelisted users configured")
     print(f"Video transcode indicators for termination: {VIDEO_TRANSCODE_INDICATORS}")
     if CHECK_AUDIO_TRANSCODES:
         print(f"Audio transcode indicators for termination: {AUDIO_TRANSCODE_INDICATORS}")

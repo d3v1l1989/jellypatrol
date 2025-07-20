@@ -8,6 +8,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **Multi-Server Support**: Monitor multiple servers simultaneously
 - **Live TV Support**: Allow container changes for live TV in web browsers
 - **Sports Stream Support**: Skip .strm files (MLB, NFL, NBA, etc.)
+- **User Whitelisting**: Exempt specific users from termination
 - **Dry-Run Mode**: Test configuration without terminating sessions
 - **User Notifications**: Send messages before terminating sessions
 - **Docker Compose**: Simple deployment with pre-built images
@@ -62,6 +63,11 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
    # Ignore .strm files (useful for sports streams that get proxied through server)
    # When enabled, sessions playing .strm files will never be terminated
    IGNORE_STRM_FILES=false
+   
+   # Whitelisted users (comma-separated list of usernames)
+   # These users can transcode without being terminated by the script
+   # Example: WHITELISTED_USERS=admin,family_member,trusted_user
+   WHITELISTED_USERS=
    
    # ===== USER MESSAGES =====
    MESSAGE_HEADER=Playback Terminated by Server Policy
@@ -119,6 +125,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **`KILL_STREAMS`**: `true` for live mode, `false` for dry-run testing
 - **`ALLOW_CONTAINER_CHANGES`**: `true` to allow container changes for live TV
 - **`IGNORE_STRM_FILES`**: `true` to skip .strm files (sports streams)
+- **`WHITELISTED_USERS`**: Comma-separated list of users exempt from termination
 - **`CHECK_AUDIO_TRANSCODES`**: `true` to also monitor audio transcoding
 
 ## Getting API Keys
