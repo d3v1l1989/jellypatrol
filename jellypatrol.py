@@ -119,17 +119,17 @@ def get_active_sessions(server_url, api_key):
 def get_item_details(server_url, api_key, item_id):
     """Fetches full item details including MediaStreams to get true source file properties."""
     try:
-        # MediaSources is returned by default, only request MediaStreams in Fields
+        # Don't use Fields parameter - some Jellyfin versions/item types reject it
+        # MediaStreams and MediaSources are included in the default response
         response = requests.get(
             f"{server_url}/Items/{item_id}",
-            params={"Fields": "MediaStreams"},
             headers=get_headers(api_key),
             timeout=10
         )
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"  [{server_url}] Error fetching item details for {item_id}: {e}")
+        # Silently fall back to session data - not a critical error
         return None
 
 def send_message_to_session(server_url, api_key, session_id, header, body_text, display_timeout_ms):
