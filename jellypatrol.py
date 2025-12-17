@@ -119,9 +119,10 @@ def get_active_sessions(server_url, api_key):
 def get_item_details(server_url, api_key, item_id):
     """Fetches full item details including MediaStreams to get true source file properties."""
     try:
+        # MediaSources is returned by default, only request MediaStreams in Fields
         response = requests.get(
             f"{server_url}/Items/{item_id}",
-            params={"Fields": "MediaStreams,MediaSources"},
+            params={"Fields": "MediaStreams"},
             headers=get_headers(api_key),
             timeout=10
         )
