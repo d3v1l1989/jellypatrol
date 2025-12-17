@@ -116,6 +116,21 @@ def get_active_sessions(server_url, api_key):
         print(f"  [{server_url}] Error fetching sessions: {e}")
         return []
 
+def get_item_details(server_url, api_key, item_id):
+    """Fetches full item details including MediaStreams to get true source file properties."""
+    try:
+        response = requests.get(
+            f"{server_url}/Items/{item_id}",
+            params={"Fields": "MediaStreams,MediaSources"},
+            headers=get_headers(api_key),
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"  [{server_url}] Error fetching item details for {item_id}: {e}")
+        return None
+
 def send_message_to_session(server_url, api_key, session_id, header, body_text, display_timeout_ms):
     """Sends a message to a specific session on a given server."""
     message_url = f"{server_url}/Sessions/{session_id}/Message"
@@ -134,28 +149,48 @@ def send_message_to_session(server_url, api_key, session_id, header, body_text, 
         print(f"    Error sending message to session {session_id} on {server_url}: {e}")
         return False
 
-def check_video_transcode(session, server_name, user_name, client_name, session_id):
+def check_video_transcode(session, server_name, user_name, client_name, session_id, server_url, api_key):
     """Check if a video transcode session should be terminated based on resolution policy."""
     print(f"  Found transcoding video session: ID={session_id}, User='{user_name}', Client='{client_name}'")
-    
+
     now_playing_item = session.get("NowPlayingItem", {})
-    media_streams = now_playing_item.get("MediaStreams", [])
-    
-    # Find video stream
+    item_id = now_playing_item.get("Id")
+
+    if not item_id:
+        print(f"    WARNING: Could not determine ItemId for session {session_id} on {server_name}.")
+        return False, ""
+
+    # Fetch full item details to get TRUE source file resolution (not transcoded output)
+    item_details = get_item_details(server_url, api_key, item_id)
+    if not item_details:
+        print(f"    WARNING: Could not fetch item details for ItemId {item_id} on {server_name}. Falling back to session data.")
+        # Fallback to session data if API call fails
+        media_streams = now_playing_item.get("MediaStreams", [])
+    else:
+        # Use MediaSources from item details for true source resolution
+        media_sources = item_details.get("MediaSources", [])
+        if media_sources:
+            media_streams = media_sources[0].get("MediaStreams", [])
+        else:
+            media_streams = item_details.get("MediaStreams", [])
+
+    # Find video stream from source file
     original_video_stream = None
     for stream in media_streams:
         if stream.get("Type") == "Video":
             original_video_stream = stream
             break
-    
+
     if not original_video_stream:
         print(f"    WARNING: Could not determine original video stream resolution for session {session_id} on {server_name}.")
         return False, ""
-    
+
     original_width = original_video_stream.get("Width", 0)
     original_height = original_video_stream.get("Height", 0)
     codec = original_video_stream.get("Codec", "N/A")
-    print(f"    Original Resolution: {original_width}x{original_height}, Codec: {codec}")
+    video_range = original_video_stream.get("VideoRange", "SDR")
+    video_range_type = original_video_stream.get("VideoRangeType", "")
+    print(f"    Source File Resolution: {original_width}x{original_height}, Codec: {codec}, VideoRange: {video_range}/{video_range_type}")
     
     transcoding_info = session.get("TranscodingInfo", {})
     transcode_reasons = []
@@ -166,13 +201,26 @@ def check_video_transcode(session, server_name, user_name, client_name, session_
         print(f"    Transcoding To: {target_width_transcoding}x{target_height_transcoding}, Reasons: {transcode_reasons}")
     else:
         print("    WARNING: TranscodingInfo not available for this session.")
-    
+
     # Check if resolution meets our policy threshold
     if original_width >= TARGET_WIDTH or original_height >= TARGET_HEIGHT:
         is_video_component_transcoding = False
-        
+
+        # Special detection for HDR tone-mapping (high CPU usage scenarios)
+        is_hdr_tonemapping = False
+        if video_range and video_range.upper() != "SDR":
+            # Source is HDR/HDR10/HDR10+/DV
+            hdr_transcode_reasons = ["VideoRangeNotSupported", "VideoRangeTypeNotSupported"]
+            if any(reason in transcode_reasons for reason in hdr_transcode_reasons):
+                is_hdr_tonemapping = True
+                print(f"      ALERT: HDR tone-mapping detected! Source is {video_range}/{video_range_type}, transcoding for client compatibility.")
+
         if not transcode_reasons and transcoding_info:
             print(f"      WARNING: No transcode reasons available, but {RESOLUTION_POLICY} file is transcoding. Assuming video transcode for safety.")
+            is_video_component_transcoding = True
+        elif is_hdr_tonemapping:
+            # HDR tone-mapping is always CPU-intensive, especially from 4K sources
+            print(f"      INFO: Flagging as video transcode due to HDR tone-mapping (CPU-intensive operation).")
             is_video_component_transcoding = True
         else:
             # Filter out container-related reasons if ALLOW_CONTAINER_CHANGES is enabled
@@ -307,7 +355,7 @@ def check_and_kill_transcodes_for_server(server_config):
         media_type = now_playing_item.get("MediaType")
 
         if media_type == "Video" and is_transcoding:
-            should_terminate, reason_message = check_video_transcode(session, server_name, user_name, client_name, session_id)
+            should_terminate, reason_message = check_video_transcode(session, server_name, user_name, client_name, session_id, server_url, api_key)
             if should_terminate:
                 terminate_session(server_url, api_key, session_id, reason_message)
         elif media_type == "Audio" and is_transcoding and CHECK_AUDIO_TRANSCODES:
