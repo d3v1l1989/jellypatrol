@@ -129,6 +129,23 @@ class ActiveEncodingFallbackTests(unittest.TestCase):
 
         self.assertEqual("new", play_session_id)
 
+    def test_reopens_access_log_after_rotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            access_log = Path(directory) / "access.log"
+            access_log.write_text(
+                "GET /video?DeviceId=tv&MediaSourceId=media&PlaySessionId=old HTTP/2.0\n",
+                encoding="utf-8",
+            )
+            self.assertEqual("old", jellypatrol.find_play_session_id(access_log, "tv", "media"))
+
+            access_log.rename(Path(directory) / "access.log.1")
+            access_log.write_text(
+                "GET /video?DeviceId=tv&MediaSourceId=media&PlaySessionId=new HTTP/2.0\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual("new", jellypatrol.find_play_session_id(access_log, "tv", "media"))
+
     @patch.object(jellypatrol.requests, "delete")
     @patch.object(jellypatrol, "find_play_session_id", return_value="play-session")
     def test_stops_only_the_matching_active_encoding(self, _find_play_session_id, delete):
@@ -153,7 +170,11 @@ class ActiveEncodingFallbackTests(unittest.TestCase):
     @patch.object(jellypatrol, "stop_active_encoding")
     @patch.object(jellypatrol, "terminate_session")
     def test_first_poll_uses_normal_stop_only(self, terminate_session, stop_active_encoding):
-        session = {"Id": "session-id"}
+        session = {
+            "Id": "session-id",
+            "DeviceId": "device-id",
+            "PlayState": {"MediaSourceId": "media-id"},
+        }
         jellypatrol.PENDING_TERMINATIONS.clear()
         with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True), patch.object(jellypatrol, "KILL_STREAMS", True):
             jellypatrol.enforce_session_termination(
@@ -162,16 +183,20 @@ class ActiveEncodingFallbackTests(unittest.TestCase):
 
         terminate_session.assert_called_once_with("http://server", "api-key", session, "reason")
         stop_active_encoding.assert_not_called()
-        self.assertIn(("http://server", "session-id"), jellypatrol.PENDING_TERMINATIONS)
+        self.assertIn(jellypatrol.get_termination_key("http://server", session), jellypatrol.PENDING_TERMINATIONS)
 
     @patch.object(jellypatrol, "stop_active_encoding")
     @patch.object(jellypatrol, "terminate_session")
     def test_next_poll_uses_fallback_when_session_is_still_transcoding(
         self, terminate_session, stop_active_encoding
     ):
-        session = {"Id": "session-id"}
+        session = {
+            "Id": "session-id",
+            "DeviceId": "device-id",
+            "PlayState": {"MediaSourceId": "media-id"},
+        }
         jellypatrol.PENDING_TERMINATIONS.clear()
-        jellypatrol.PENDING_TERMINATIONS.add(("http://server", "session-id"))
+        jellypatrol.PENDING_TERMINATIONS.add(jellypatrol.get_termination_key("http://server", session))
         with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True):
             jellypatrol.enforce_session_termination(
                 "http://server", "api-key", session, "jellyfin", "reason"
@@ -179,6 +204,32 @@ class ActiveEncodingFallbackTests(unittest.TestCase):
 
         terminate_session.assert_not_called()
         stop_active_encoding.assert_called_once_with("http://server", "api-key", session)
+
+    @patch.object(jellypatrol, "stop_active_encoding")
+    @patch.object(jellypatrol, "terminate_session")
+    def test_changed_playback_gets_normal_stop_before_fallback(self, terminate_session, stop_active_encoding):
+        old_playback = {
+            "Id": "session-id",
+            "DeviceId": "device-id",
+            "PlayState": {"MediaSourceId": "old-media"},
+        }
+        new_playback = {
+            "Id": "session-id",
+            "DeviceId": "device-id",
+            "PlayState": {"MediaSourceId": "new-media"},
+        }
+        jellypatrol.PENDING_TERMINATIONS.clear()
+        jellypatrol.PENDING_TERMINATIONS.add(jellypatrol.get_termination_key("http://server", old_playback))
+        jellypatrol.clear_stale_pending_terminations("http://server", [new_playback])
+
+        with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True), patch.object(jellypatrol, "KILL_STREAMS", True):
+            jellypatrol.enforce_session_termination(
+                "http://server", "api-key", new_playback, "jellyfin", "reason"
+            )
+
+        terminate_session.assert_called_once_with("http://server", "api-key", new_playback, "reason")
+        stop_active_encoding.assert_not_called()
+        self.assertNotIn(jellypatrol.get_termination_key("http://server", old_playback), jellypatrol.PENDING_TERMINATIONS)
 
 
 if __name__ == "__main__":

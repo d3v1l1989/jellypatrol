@@ -25,11 +25,12 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
        image: ghcr.io/d3v1l1989/jellypatrol:latest
        container_name: jellypatrol
        restart: unless-stopped
-     env_file:
-       - .env
-     # Required only when ACTIVE_ENCODING_FALLBACK=true
-     volumes:
-       - /path/to/traefik/access.log:/logs/traefik-access.log:ro
+       env_file:
+         - .env
+       # Required only when ACTIVE_ENCODING_FALLBACK=true.
+       # Mount the directory so access.log rotation remains visible.
+       volumes:
+         - /path/to/traefik:/logs/traefik:ro
        # Adjust networking as needed for your setup
        networks:
          - mediaserver
@@ -76,7 +77,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
    # Stop the server-side Jellyfin encoding job if a client ignores Stop Playback.
    # The proxy access log supplies the PlaySessionId omitted by Jellyfin /Sessions.
    ACTIVE_ENCODING_FALLBACK=false
-   ACCESS_LOG_PATH=/logs/traefik-access.log
+   ACCESS_LOG_PATH=/logs/traefik/access.log
    ACCESS_LOG_TAIL_BYTES=16777216
    
    # ===== USER MESSAGES =====
