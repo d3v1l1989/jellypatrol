@@ -76,7 +76,6 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
    # Stop the server-side Jellyfin encoding job if a client ignores Stop Playback.
    # The proxy access log supplies the PlaySessionId omitted by Jellyfin /Sessions.
    ACTIVE_ENCODING_FALLBACK=false
-   STOP_VERIFY_SECONDS=2
    ACCESS_LOG_PATH=/logs/traefik-access.log
    ACCESS_LOG_TAIL_BYTES=16777216
    
@@ -138,7 +137,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **`IGNORE_STRM_FILES`**: `true` to skip .strm files (sports streams)
 - **`WHITELISTED_USERS`**: Comma-separated list of users exempt from termination
 - **`CHECK_AUDIO_TRANSCODES`**: `true` to also monitor audio transcoding
-- **`ACTIVE_ENCODING_FALLBACK`**: After verifying that Jellyfin's normal Stop command failed, stop only the matching server-side encoding job using `deviceId` and `playSessionId`
+- **`ACTIVE_ENCODING_FALLBACK`**: If a session is still transcoding on the next polling cycle after Jellyfin's normal Stop command, stop only the matching server-side encoding job using `deviceId` and `playSessionId`
 - **`ACCESS_LOG_PATH`**: Read-only reverse-proxy access log containing Jellyfin HLS query parameters; required by the active-encoding fallback
 
 ## Getting API Keys

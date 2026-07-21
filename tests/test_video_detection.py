@@ -151,33 +151,33 @@ class ActiveEncodingFallbackTests(unittest.TestCase):
         )
 
     @patch.object(jellypatrol, "stop_active_encoding")
-    @patch.object(jellypatrol, "session_is_still_transcoding", return_value=False)
-    @patch.object(jellypatrol.time, "sleep")
-    @patch.object(jellypatrol.requests, "post")
-    @patch.object(jellypatrol, "send_message_to_session")
-    def test_does_not_fallback_when_normal_stop_works(
-        self, _send_message, post, _sleep, _session_is_still_transcoding, stop_active_encoding
-    ):
-        post.return_value.status_code = 204
+    @patch.object(jellypatrol, "terminate_session")
+    def test_first_poll_uses_normal_stop_only(self, terminate_session, stop_active_encoding):
         session = {"Id": "session-id"}
-        with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True):
-            jellypatrol.terminate_session("http://server", "api-key", session, "jellyfin")
+        jellypatrol.PENDING_TERMINATIONS.clear()
+        with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True), patch.object(jellypatrol, "KILL_STREAMS", True):
+            jellypatrol.enforce_session_termination(
+                "http://server", "api-key", session, "jellyfin", "reason"
+            )
 
+        terminate_session.assert_called_once_with("http://server", "api-key", session, "reason")
         stop_active_encoding.assert_not_called()
+        self.assertIn(("http://server", "session-id"), jellypatrol.PENDING_TERMINATIONS)
 
     @patch.object(jellypatrol, "stop_active_encoding")
-    @patch.object(jellypatrol, "session_is_still_transcoding", return_value=True)
-    @patch.object(jellypatrol.time, "sleep")
-    @patch.object(jellypatrol.requests, "post")
-    @patch.object(jellypatrol, "send_message_to_session")
-    def test_falls_back_when_session_is_still_transcoding(
-        self, _send_message, post, _sleep, _session_is_still_transcoding, stop_active_encoding
+    @patch.object(jellypatrol, "terminate_session")
+    def test_next_poll_uses_fallback_when_session_is_still_transcoding(
+        self, terminate_session, stop_active_encoding
     ):
-        post.return_value.status_code = 204
         session = {"Id": "session-id"}
+        jellypatrol.PENDING_TERMINATIONS.clear()
+        jellypatrol.PENDING_TERMINATIONS.add(("http://server", "session-id"))
         with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True):
-            jellypatrol.terminate_session("http://server", "api-key", session, "jellyfin")
+            jellypatrol.enforce_session_termination(
+                "http://server", "api-key", session, "jellyfin", "reason"
+            )
 
+        terminate_session.assert_not_called()
         stop_active_encoding.assert_called_once_with("http://server", "api-key", session)
 
 

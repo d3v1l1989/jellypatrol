@@ -18,9 +18,9 @@ ALLOW_CONTAINER_CHANGES = os.getenv('ALLOW_CONTAINER_CHANGES', 'false').lower() 
 IGNORE_STRM_FILES = os.getenv('IGNORE_STRM_FILES', 'false').lower() == 'true'
 WHITELISTED_USERS = [user.strip() for user in os.getenv('WHITELISTED_USERS', '').split(',') if user.strip()]
 ACTIVE_ENCODING_FALLBACK = os.getenv('ACTIVE_ENCODING_FALLBACK', 'false').lower() == 'true'
-STOP_VERIFY_SECONDS = float(os.getenv('STOP_VERIFY_SECONDS', '2'))
 ACCESS_LOG_PATH = os.getenv('ACCESS_LOG_PATH', '')
 ACCESS_LOG_TAIL_BYTES = int(os.getenv('ACCESS_LOG_TAIL_BYTES', str(16 * 1024 * 1024)))
+PENDING_TERMINATIONS = set()
 
 MESSAGE_HEADER = os.getenv('MESSAGE_HEADER', 'Playback Terminated by Server Policy')
 MESSAGE_BODY = os.getenv('MESSAGE_BODY', 'Your video transcode session is being terminated due to server resource policy. Please adjust your quality settings.')
@@ -191,19 +191,6 @@ def find_play_session_id(access_log_path, device_id, media_source_id, tail_bytes
             return unquote_plus(play_session_match.group(1))
 
     return None
-
-def session_is_still_transcoding(server_url, api_key, session_id):
-    """Check whether the exact session still reports active transcoding."""
-    sessions = get_active_sessions(server_url, api_key)
-    for session in sessions:
-        if session.get("Id") != session_id:
-            continue
-        return (
-            bool(session.get("NowPlayingItem"))
-            and session.get("PlayState", {}).get("PlayMethod") == "Transcode"
-            and bool(session.get("TranscodingInfo"))
-        )
-    return False
 
 def stop_active_encoding(server_url, api_key, session):
     """Stop Jellyfin's server-side encoding job without revoking the client device."""
@@ -419,8 +406,8 @@ def check_audio_transcode(session, server_name, user_name, client_name, session_
         print(f"    INFO: Audio transcoding on {server_name} but reasons not in kill list. Skipping. Reasons: {transcode_reasons}")
         return False, ""
 
-def terminate_session(server_url, api_key, session, server_type, reason="Terminating transcode session."):
-    """Stop playback, then stop Jellyfin's encoding job if the client ignores the command."""
+def terminate_session(server_url, api_key, session, reason="Terminating transcode session."):
+    """Send a message and the media server's normal Stop Playback command."""
     session_id = session.get("Id")
     try:
         print(f"  Terminating session {session_id} on {server_url} for reason: {reason}")
@@ -432,18 +419,26 @@ def terminate_session(server_url, api_key, session, server_type, reason="Termina
             response = requests.post(stop_url, headers=get_headers(api_key), timeout=10)
             response.raise_for_status()
             print(f"    Session {session_id} 'Stop Playback' command sent. Status: {response.status_code}.")
-
-            if ACTIVE_ENCODING_FALLBACK and server_type.lower() == "jellyfin":
-                time.sleep(STOP_VERIFY_SECONDS)
-                if session_is_still_transcoding(server_url, api_key, session_id):
-                    print(f"    WARNING: Session {session_id} is still transcoding; invoking active-encoding fallback.")
-                    stop_active_encoding(server_url, api_key, session)
-                else:
-                    print(f"    Session {session_id} stopped normally; active-encoding fallback not needed.")
         else:
             print(f"  [DRY RUN] Would send message and then 'Stop Playback' command to session {session_id} on {server_url} for: {reason}")
     except requests.exceptions.RequestException as e:
         print(f"  Error in termination process for session {session_id} on {server_url}: {e}")
+
+def enforce_session_termination(server_url, api_key, session, server_type, reason):
+    """Use normal Stop first, then the encoding fallback on the next poll."""
+    session_id = session.get("Id")
+    termination_key = (server_url, session_id)
+    fallback_enabled = ACTIVE_ENCODING_FALLBACK and server_type.lower() == "jellyfin"
+
+    if fallback_enabled and termination_key in PENDING_TERMINATIONS:
+        print(f"  WARNING: Session {session_id} is still transcoding on the next poll; invoking active-encoding fallback.")
+        stop_active_encoding(server_url, api_key, session)
+        return
+
+    terminate_session(server_url, api_key, session, reason)
+    if fallback_enabled and KILL_STREAMS:
+        PENDING_TERMINATIONS.add(termination_key)
+        print(f"    Session {session_id} will be verified on the next poll before any fallback is used.")
 
 def check_and_kill_transcodes_for_server(server_config):
     """Checks active sessions on a specific server and terminates transcodes based on configured policies."""
@@ -462,6 +457,11 @@ def check_and_kill_transcodes_for_server(server_config):
     if not sessions:
         print(f"  No active sessions found or error fetching sessions from {server_name}.")
         return
+
+    active_session_ids = {session.get("Id") for session in sessions if session.get("Id")}
+    for termination_key in list(PENDING_TERMINATIONS):
+        if termination_key[0] == server_url and termination_key[1] not in active_session_ids:
+            PENDING_TERMINATIONS.discard(termination_key)
 
     for session in sessions:
         session_id = session.get("Id")
@@ -489,12 +489,17 @@ def check_and_kill_transcodes_for_server(server_config):
         if media_type == "Video" and is_transcoding:
             should_terminate, reason_message = check_video_transcode(session, server_name, user_name, client_name, session_id, server_url, api_key)
             if should_terminate:
-                terminate_session(server_url, api_key, session, server_type, reason_message)
+                enforce_session_termination(server_url, api_key, session, server_type, reason_message)
+            else:
+                PENDING_TERMINATIONS.discard((server_url, session_id))
         elif media_type == "Audio" and is_transcoding and CHECK_AUDIO_TRANSCODES:
             should_terminate, reason_message = check_audio_transcode(session, server_name, user_name, client_name, session_id)
             if should_terminate:
-                terminate_session(server_url, api_key, session, server_type, reason_message)
+                enforce_session_termination(server_url, api_key, session, server_type, reason_message)
+            else:
+                PENDING_TERMINATIONS.discard((server_url, session_id))
         elif media_type == "Video" and not is_transcoding:
+            PENDING_TERMINATIONS.discard((server_url, session_id))
             print(f"  Direct Play/Stream session on {server_name}: ID={session_id}, User='{user_name}', Client='{client_name}'. Skipping.")
         elif media_type == "Audio" and not is_transcoding and CHECK_AUDIO_TRANSCODES:
             print(f"  Direct Play/Stream audio session on {server_name}: ID={session_id}, User='{user_name}', Client='{client_name}'. Skipping.")
