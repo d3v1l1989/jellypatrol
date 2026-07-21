@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -111,6 +112,73 @@ class VideoTranscodeEvidenceTests(unittest.TestCase):
 
         self.assertFalse(should_terminate)
         self.assertEqual("", reason)
+
+
+class ActiveEncodingFallbackTests(unittest.TestCase):
+    def test_finds_newest_matching_play_session_id(self):
+        lines = [
+            'GET /videos/item/hls/main/1?DeviceId=tv-1&MediaSourceId=media-1&PlaySessionId=old HTTP/2.0',
+            'GET /videos/item/hls/main/1?DeviceId=other&MediaSourceId=media-1&PlaySessionId=wrong HTTP/2.0',
+            'GET /videos/item/hls/main/2?DeviceId=tv-1&MediaSourceId=media-1&PlaySessionId=new HTTP/2.0',
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as access_log:
+            access_log.write("\n".join(lines))
+            access_log.flush()
+
+            play_session_id = jellypatrol.find_play_session_id(access_log.name, "tv-1", "media-1")
+
+        self.assertEqual("new", play_session_id)
+
+    @patch.object(jellypatrol.requests, "delete")
+    @patch.object(jellypatrol, "find_play_session_id", return_value="play-session")
+    def test_stops_only_the_matching_active_encoding(self, _find_play_session_id, delete):
+        response = delete.return_value
+        response.status_code = 204
+        session = {
+            "Id": "session-id",
+            "DeviceId": "device-id",
+            "PlayState": {"MediaSourceId": "media-source-id"},
+        }
+
+        stopped = jellypatrol.stop_active_encoding("http://server", "api-key", session)
+
+        self.assertTrue(stopped)
+        delete.assert_called_once_with(
+            "http://server/Videos/ActiveEncodings",
+            headers=jellypatrol.get_headers("api-key"),
+            params={"deviceId": "device-id", "playSessionId": "play-session"},
+            timeout=10,
+        )
+
+    @patch.object(jellypatrol, "stop_active_encoding")
+    @patch.object(jellypatrol, "session_is_still_transcoding", return_value=False)
+    @patch.object(jellypatrol.time, "sleep")
+    @patch.object(jellypatrol.requests, "post")
+    @patch.object(jellypatrol, "send_message_to_session")
+    def test_does_not_fallback_when_normal_stop_works(
+        self, _send_message, post, _sleep, _session_is_still_transcoding, stop_active_encoding
+    ):
+        post.return_value.status_code = 204
+        session = {"Id": "session-id"}
+        with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True):
+            jellypatrol.terminate_session("http://server", "api-key", session, "jellyfin")
+
+        stop_active_encoding.assert_not_called()
+
+    @patch.object(jellypatrol, "stop_active_encoding")
+    @patch.object(jellypatrol, "session_is_still_transcoding", return_value=True)
+    @patch.object(jellypatrol.time, "sleep")
+    @patch.object(jellypatrol.requests, "post")
+    @patch.object(jellypatrol, "send_message_to_session")
+    def test_falls_back_when_session_is_still_transcoding(
+        self, _send_message, post, _sleep, _session_is_still_transcoding, stop_active_encoding
+    ):
+        post.return_value.status_code = 204
+        session = {"Id": "session-id"}
+        with patch.object(jellypatrol, "ACTIVE_ENCODING_FALLBACK", True):
+            jellypatrol.terminate_session("http://server", "api-key", session, "jellyfin")
+
+        stop_active_encoding.assert_called_once_with("http://server", "api-key", session)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **User Whitelisting**: Exempt specific users from termination
 - **Dry-Run Mode**: Test configuration without terminating sessions
 - **User Notifications**: Send messages before terminating sessions
+- **Server-Side Stop Fallback**: Stop Jellyfin encoding jobs when clients ignore remote playback commands
 - **Docker Compose**: Simple deployment with pre-built images
 
 ## Quick Start with Docker Compose
@@ -24,8 +25,11 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
        image: ghcr.io/d3v1l1989/jellypatrol:latest
        container_name: jellypatrol
        restart: unless-stopped
-       env_file:
-         - .env
+     env_file:
+       - .env
+     # Required only when ACTIVE_ENCODING_FALLBACK=true
+     volumes:
+       - /path/to/traefik/access.log:/logs/traefik-access.log:ro
        # Adjust networking as needed for your setup
        networks:
          - mediaserver
@@ -68,6 +72,13 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
    # These users can transcode without being terminated by the script
    # Example: WHITELISTED_USERS=admin,family_member,trusted_user
    WHITELISTED_USERS=
+
+   # Stop the server-side Jellyfin encoding job if a client ignores Stop Playback.
+   # The proxy access log supplies the PlaySessionId omitted by Jellyfin /Sessions.
+   ACTIVE_ENCODING_FALLBACK=false
+   STOP_VERIFY_SECONDS=2
+   ACCESS_LOG_PATH=/logs/traefik-access.log
+   ACCESS_LOG_TAIL_BYTES=16777216
    
    # ===== USER MESSAGES =====
    MESSAGE_HEADER=Playback Terminated by Server Policy
@@ -127,6 +138,8 @@ Monitors Jellyfin/Emby media servers and automatically terminates transcode sess
 - **`IGNORE_STRM_FILES`**: `true` to skip .strm files (sports streams)
 - **`WHITELISTED_USERS`**: Comma-separated list of users exempt from termination
 - **`CHECK_AUDIO_TRANSCODES`**: `true` to also monitor audio transcoding
+- **`ACTIVE_ENCODING_FALLBACK`**: After verifying that Jellyfin's normal Stop command failed, stop only the matching server-side encoding job using `deviceId` and `playSessionId`
+- **`ACCESS_LOG_PATH`**: Read-only reverse-proxy access log containing Jellyfin HLS query parameters; required by the active-encoding fallback
 
 ## Getting API Keys
 
