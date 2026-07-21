@@ -106,6 +106,42 @@ def is_user_whitelisted(user_name):
     # Case-insensitive comparison
     return user_name.lower() in [user.lower() for user in WHITELISTED_USERS]
 
+def get_video_transcode_evidence(original_video_stream, transcoding_info):
+    """Return API evidence that the video component itself is being converted.
+
+    Jellyfin can report only a container-related TranscodeReason even while it is
+    decoding, scaling, tone-mapping, and re-encoding video.  TranscodeReasons are
+    therefore useful context, but are not authoritative for whether video is
+    direct.  Prefer the explicit IsVideoDirect flag and corroborate it with
+    source/output codec and dimensions for older server versions.
+    """
+    if not transcoding_info:
+        return []
+
+    evidence = []
+    is_video_direct = transcoding_info.get("IsVideoDirect")
+    if is_video_direct is False:
+        evidence.append("server reports IsVideoDirect=false")
+
+    source_codec = str(original_video_stream.get("Codec") or "").lower()
+    target_codec = str(transcoding_info.get("VideoCodec") or "").lower()
+    if source_codec and target_codec and source_codec != target_codec:
+        evidence.append(f"video codec changes from {source_codec} to {target_codec}")
+
+    source_width = original_video_stream.get("Width") or 0
+    source_height = original_video_stream.get("Height") or 0
+    target_width = transcoding_info.get("Width") or 0
+    target_height = transcoding_info.get("Height") or 0
+    if (source_width and target_width and source_width != target_width) or (
+        source_height and target_height and source_height != target_height
+    ):
+        evidence.append(
+            f"video dimensions change from {source_width}x{source_height} "
+            f"to {target_width}x{target_height}"
+        )
+
+    return evidence
+
 def get_active_sessions(server_url, api_key):
     """Fetches active sessions from a given server."""
     try:
@@ -205,18 +241,28 @@ def check_video_transcode(session, server_name, user_name, client_name, session_
 
     # Check if resolution meets our policy threshold
     if original_width >= TARGET_WIDTH or original_height >= TARGET_HEIGHT:
-        is_video_component_transcoding = False
+        video_transcode_evidence = get_video_transcode_evidence(original_video_stream, transcoding_info)
+        is_video_component_transcoding = bool(video_transcode_evidence)
+        if video_transcode_evidence:
+            print(f"      ALERT: Video conversion detected from session data: {'; '.join(video_transcode_evidence)}.")
 
-        # Special detection for HDR tone-mapping (high CPU usage scenarios)
+        # HDR video conversion is a tone-mapping risk even when Jellyfin omits
+        # VideoRangeNotSupported from TranscodeReasons.
         is_hdr_tonemapping = False
         if video_range and video_range.upper() != "SDR":
-            # Source is HDR/HDR10/HDR10+/DV
             hdr_transcode_reasons = ["VideoRangeNotSupported", "VideoRangeTypeNotSupported"]
             if any(reason in transcode_reasons for reason in hdr_transcode_reasons):
                 is_hdr_tonemapping = True
                 print(f"      ALERT: HDR tone-mapping detected! Source is {video_range}/{video_range_type}, transcoding for client compatibility.")
+            elif is_video_component_transcoding:
+                is_hdr_tonemapping = True
+                print(f"      ALERT: HDR source is being video-transcoded ({video_range}/{video_range_type}); treating it as a tone-mapping risk.")
 
-        if not transcode_reasons and transcoding_info:
+        if is_video_component_transcoding:
+            # Definitive video conversion evidence takes precedence over the
+            # incomplete TranscodeReasons list and ALLOW_CONTAINER_CHANGES.
+            pass
+        elif not transcode_reasons and transcoding_info:
             print(f"      WARNING: No transcode reasons available, but {RESOLUTION_POLICY} file is transcoding. Assuming video transcode for safety.")
             is_video_component_transcoding = True
         elif is_hdr_tonemapping:
